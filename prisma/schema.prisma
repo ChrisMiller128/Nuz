@@ -7,6 +7,8 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─── CORE MODELS ────────────────────────────────────────────────────────
+
 model User {
   id            String         @id @default(cuid())
   email         String         @unique
@@ -19,6 +21,13 @@ model User {
   generatedRoms GeneratedRom[]
   saveStates    SaveState[]
   deviceSessions DeviceSession[]
+  achievements  UserAchievement[]
+  discordIntegration DiscordIntegration?
+  communityPresets CommunityPreset[]
+  presetVotes    PresetVote[]
+  teamPlans      TeamPlan[]
+  challengeEntries ChallengeEntry[]
+  // Leaderboard runs tracked via ChallengeEntry
 
   @@index([email])
   @@index([username])
@@ -34,13 +43,19 @@ model Game {
   description String?
   coverArt    String?
   sortOrder   Int       @default(0)
+  isRomHack   Boolean   @default(false)
+  hackOf      String?   // slug of the base game this is a hack of
+  hackNotes   String?   // warnings/notes specific to this hack
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   baseRoms    BaseRom[]
   runs        Run[]
+  challenges  Challenge[]
+  communityPresets CommunityPreset[]
 
   @@index([platform])
   @@index([slug])
+  @@index([isRomHack])
 }
 
 model BaseRom {
@@ -69,17 +84,22 @@ model GeneratedRom {
   baseRom               BaseRom           @relation(fields: [baseRomId], references: [id], onDelete: Cascade)
   generatorProfileId    String?
   generatorProfile      GeneratorProfile? @relation(fields: [generatorProfileId], references: [id], onDelete: SetNull)
+  generatorProvider     String            @default("builtin") // "builtin" | "uprz" | "custom"
+  generatorVersion      String?
   generatorSettingsJson Json
+  generatorLog          String?           // stdout/stderr from generator
   seed                  String
   checksum              String
   storagePath           String
   fileName              String
   fileSize              BigInt
   status                GeneratedRomStatus @default(READY)
+  errorMessage          String?
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
   runs                  Run[]
   saveStates            SaveState[]
+  generatorJob          GeneratorJob?
 
   @@index([userId])
   @@index([baseRomId])
@@ -96,9 +116,31 @@ model GeneratorProfile {
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   generatedRoms GeneratedRom[]
+  communityPresets CommunityPreset[]
 
   @@index([rulesPreset])
 }
+
+// ─── GENERATOR JOB (async UPR-ZX support) ───────────────────────────────
+
+model GeneratorJob {
+  id              String          @id @default(cuid())
+  generatedRomId  String          @unique
+  generatedRom    GeneratedRom    @relation(fields: [generatedRomId], references: [id], onDelete: Cascade)
+  provider        String          // "builtin" | "uprz"
+  status          JobStatus       @default(QUEUED)
+  progress        Int             @default(0) // 0-100
+  startedAt       DateTime?
+  completedAt     DateTime?
+  errorMessage    String?
+  logOutput       String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([status])
+}
+
+// ─── RUN MODEL (extended) ───────────────────────────────────────────────
 
 model Run {
   id              String        @id @default(cuid())
@@ -125,6 +167,20 @@ model Run {
   lastPlayedAt    DateTime?
   completedAt     DateTime?
   failedAt        DateTime?
+  // Public sharing
+  isPublic        Boolean       @default(false)
+  shareSlug       String?       @unique
+  // Speed run timer
+  timerStartedAt  DateTime?
+  timerPausedAt   DateTime?
+  timerElapsedMs  BigInt        @default(0)
+  timerSplits     Json?         // array of { label, elapsedMs }
+  // Challenge/leaderboard
+  challengeId     String?
+  challenge       Challenge?    @relation(fields: [challengeId], references: [id], onDelete: SetNull)
+  isLeaderboardEligible Boolean @default(false)
+  // Export version tracking
+  exportVersion   Int           @default(1)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   saveStates      SaveState[]
@@ -132,11 +188,14 @@ model Run {
   pokemonEntries  PokemonEntry[]
   badgeProgress   BadgeProgress[]
   runNotes        RunNote[]
+  challengeEntry  ChallengeEntry?
 
   @@index([userId])
   @@index([gameId])
   @@index([status])
   @@index([lastPlayedAt])
+  @@index([shareSlug])
+  @@index([challengeId])
 }
 
 model SaveState {
@@ -154,6 +213,7 @@ model SaveState {
   fileSize       BigInt
   checksum       String
   screenshotPath String?
+  screenshotUrl  String?      // relative URL for thumbnail display
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
@@ -169,9 +229,11 @@ model Encounter {
   routeName    String
   pokemonName  String?
   pokemonLevel Int?
+  pokemonDexNo Int?            // national dex number for analytics
   status       EncounterStatus @default(PENDING)
   isStatic     Boolean         @default(false)
   isGift       Boolean         @default(false)
+  isShiny      Boolean         @default(false)
   notes        String?
   order        Int             @default(0)
   createdAt    DateTime        @default(now())
@@ -187,6 +249,7 @@ model PokemonEntry {
   run          Run           @relation(fields: [runId], references: [id], onDelete: Cascade)
   nickname     String
   species      String
+  dexNo        Int?          // national dex number for reference/analytics
   level        Int           @default(5)
   status       PokemonStatus @default(ALIVE)
   location     PokemonLocation @default(PARTY)
@@ -250,6 +313,163 @@ model DeviceSession {
   @@index([userId])
 }
 
+// ─── ACHIEVEMENTS ───────────────────────────────────────────────────────
+
+model Achievement {
+  id          String   @id @default(cuid())
+  key         String   @unique // machine key e.g. "first_completion"
+  name        String
+  description String
+  icon        String   @default("🏆")
+  category    AchievementCategory @default(GENERAL)
+  rarity      AchievementRarity   @default(COMMON)
+  points      Int      @default(10)
+  hidden      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  users       UserAchievement[]
+
+  @@index([category])
+}
+
+model UserAchievement {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  unlockedAt    DateTime @default(now())
+  sourceRunId   String?  // the run that triggered this achievement
+
+  @@unique([userId, achievementId])
+  @@index([userId])
+}
+
+// ─── CHALLENGES & LEADERBOARDS ──────────────────────────────────────────
+
+model Challenge {
+  id            String   @id @default(cuid())
+  name          String
+  description   String
+  slug          String   @unique
+  gameId        String
+  game          Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  seed          String   // mandatory seed for fair competition
+  rulesPreset   RulesPreset
+  rulesJson     Json?
+  generatorSettingsJson Json?
+  rankMetric    RankMetric @default(COMPLETION_TIME)
+  isActive      Boolean  @default(true)
+  startsAt      DateTime?
+  endsAt        DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  runs          Run[]
+  entries       ChallengeEntry[]
+
+  @@index([slug])
+  @@index([gameId])
+  @@index([isActive])
+}
+
+model ChallengeEntry {
+  id            String    @id @default(cuid())
+  challengeId   String
+  challenge     Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  runId         String    @unique
+  run           Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  completionMs  BigInt?   // total time if completed
+  deathCount    Int       @default(0)
+  badgeCount    Int       @default(0)
+  status        RunStatus @default(ACTIVE)
+  verifiedAt    DateTime? // null = unverified
+  // Anti-cheat: trust model notes are in code comments.
+  // Phase 1 uses honor system + seed verification.
+  // Phase 2 could add save state checkpoints.
+  submittedAt   DateTime  @default(now())
+
+  @@unique([challengeId, userId])
+  @@index([challengeId])
+  @@index([userId])
+}
+
+// ─── DISCORD INTEGRATION ────────────────────────────────────────────────
+
+model DiscordIntegration {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  webhookUrl    String   // encrypted in practice; stored securely
+  isActive      Boolean  @default(true)
+  // Which events to post
+  notifyRunStart   Boolean @default(true)
+  notifyBadge      Boolean @default(true)
+  notifyDeath      Boolean @default(true)
+  notifyCompletion Boolean @default(true)
+  notifyShiny      Boolean @default(true)
+  notifyWipe       Boolean @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ─── COMMUNITY PRESETS ──────────────────────────────────────────────────
+
+model CommunityPreset {
+  id            String   @id @default(cuid())
+  authorId      String
+  author        User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  profileId     String?
+  profile       GeneratorProfile? @relation(fields: [profileId], references: [id], onDelete: SetNull)
+  title         String
+  description   String?
+  gameId        String?
+  game          Game?    @relation(fields: [gameId], references: [id], onDelete: SetNull)
+  settingsJson  Json
+  tags          String[] @default([])
+  usageCount    Int      @default(0)
+  isPublished   Boolean  @default(false)
+  isFeatured    Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  votes         PresetVote[]
+
+  @@index([authorId])
+  @@index([gameId])
+  @@index([isPublished])
+  @@index([usageCount])
+}
+
+model PresetVote {
+  id        String   @id @default(cuid())
+  presetId  String
+  preset    CommunityPreset @relation(fields: [presetId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  value     Int      @default(1) // +1 upvote
+  createdAt DateTime @default(now())
+
+  @@unique([presetId, userId])
+}
+
+// ─── TEAM BUILDER / PLANNER ─────────────────────────────────────────────
+
+model TeamPlan {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  gameSlug  String?  // associated game
+  notes     String?
+  slots     Json     // array of { species, dexNo, nickname, role, notes, types }
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ─── ENUMS ──────────────────────────────────────────────────────────────
+
 enum Platform {
   GB
   GBC
@@ -309,4 +529,35 @@ enum GeneratedRomStatus {
   READY
   FAILED
   ARCHIVED
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum AchievementCategory {
+  GENERAL
+  COMPLETION
+  COMBAT
+  COLLECTION
+  CHALLENGE
+  SOCIAL
+}
+
+enum AchievementRarity {
+  COMMON
+  UNCOMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+enum RankMetric {
+  COMPLETION_TIME
+  DEATH_COUNT
+  BADGE_SPEED
+  ATTEMPTS
 }
