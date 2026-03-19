@@ -56,7 +56,12 @@ export async function POST(req: NextRequest) {
     const preset = await prisma.communityPreset.create({
       data: {
         authorId: user.id,
-        ...parsed.data,
+        title: parsed.data.title,
+        description: parsed.data.description,
+        gameId: parsed.data.gameId,
+        settingsJson: parsed.data.settingsJson as object,
+        tags: parsed.data.tags,
+        isPublished: parsed.data.isPublished,
       },
     });
 

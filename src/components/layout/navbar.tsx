@@ -29,7 +29,8 @@ export function Navbar() {
                 <Link href="/dashboard" className="nuz-btn-ghost">Dashboard</Link>
                 <Link href="/library" className="nuz-btn-ghost">Library</Link>
                 <Link href="/runs/new" className="nuz-btn-ghost">New Run</Link>
-                <Link href="/generated-roms" className="nuz-btn-ghost">My ROMs</Link>
+                <Link href="/analytics" className="nuz-btn-ghost">Analytics</Link>
+                <Link href="/achievements" className="nuz-btn-ghost">🏆</Link>
                 <Link href="/settings" className="nuz-btn-ghost">Settings</Link>
                 <div className="w-px h-8 bg-nuz-border mx-2" />
                 <span className="text-nuz-text-dim text-sm mr-2">
@@ -76,6 +77,12 @@ export function Navbar() {
                   <Link href="/dashboard" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Dashboard</Link>
                   <Link href="/library" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Library</Link>
                   <Link href="/runs/new" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>New Run</Link>
+                  <Link href="/analytics" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Analytics</Link>
+                  <Link href="/achievements" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Achievements</Link>
+                  <Link href="/leaderboards" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Leaderboards</Link>
+                  <Link href="/team-builder" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Team Builder</Link>
+                  <Link href="/pokedex" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Pokédex</Link>
+                  <Link href="/community-presets" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Presets</Link>
                   <Link href="/generated-roms" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>My ROMs</Link>
                   <Link href="/settings" className="nuz-btn-ghost text-left" onClick={() => setMobileOpen(false)}>Settings</Link>
                   <div className="nuz-divider my-2" />

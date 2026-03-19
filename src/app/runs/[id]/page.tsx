@@ -226,7 +226,7 @@ export default function RunDetailPage() {
             </div>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {run.status === 'ACTIVE' && (
               <>
                 <Link href={`/play/${run.id}`} className="nuz-btn-primary">
@@ -240,6 +240,24 @@ export default function RunDetailPage() {
                 </button>
               </>
             )}
+            {(run.status === 'COMPLETED' || run.status === 'FAILED') && (
+              <button
+                onClick={async () => {
+                  await fetch(`/api/runs/${runId}/share`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ isPublic: true }),
+                  });
+                  fetchRun();
+                }}
+                className="nuz-btn-secondary text-sm"
+              >
+                📢 Share
+              </button>
+            )}
+            <a href={`/api/runs/${runId}/export`} className="nuz-btn-ghost text-sm">
+              📥 Export JSON
+            </a>
           </div>
         </div>
 

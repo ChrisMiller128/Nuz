@@ -143,6 +143,30 @@ async function main() {
   });
   console.log('Created demo user (demo@nuzlocke.emulator.st / nuzlocke123)');
 
+  // Seed achievements
+  const achievementDefs = [
+    { key: 'first_completion', name: 'Champion', description: 'Complete your first Nuzlocke run', icon: '🏆', category: 'COMPLETION' as const, rarity: 'COMMON' as const, points: 50 },
+    { key: 'deathless', name: 'Flawless Victory', description: 'Complete a run without losing a single Pokémon', icon: '💎', category: 'COMBAT' as const, rarity: 'LEGENDARY' as const, points: 500 },
+    { key: 'hardcore_completion', name: 'Ironman', description: 'Complete a Hardcore Nuzlocke run', icon: '💀', category: 'CHALLENGE' as const, rarity: 'EPIC' as const, points: 200 },
+    { key: 'first_wipe', name: 'Wiped Out', description: 'Experience your first team wipe', icon: '☠️', category: 'GENERAL' as const, rarity: 'COMMON' as const, points: 10 },
+    { key: 'shiny_encounter', name: 'Shiny Hunter', description: 'Encounter a shiny Pokémon during a run', icon: '✨', category: 'COLLECTION' as const, rarity: 'RARE' as const, points: 100 },
+    { key: 'five_completions', name: 'Veteran Trainer', description: 'Complete 5 Nuzlocke runs', icon: '⭐', category: 'COMPLETION' as const, rarity: 'UNCOMMON' as const, points: 100 },
+    { key: 'ten_completions', name: 'Nuzlocke Master', description: 'Complete 10 Nuzlocke runs', icon: '👑', category: 'COMPLETION' as const, rarity: 'RARE' as const, points: 250 },
+    { key: 'full_badges', name: 'Badge Collector', description: 'Earn all 8 badges in a single run', icon: '🏅', category: 'COMPLETION' as const, rarity: 'UNCOMMON' as const, points: 75 },
+    { key: 'comeback_kid', name: 'Comeback Kid', description: 'Complete a run after losing 10+ Pokémon', icon: '🔥', category: 'COMBAT' as const, rarity: 'RARE' as const, points: 150 },
+    { key: 'challenge_complete', name: 'Challenger', description: 'Complete a community challenge run', icon: '🎯', category: 'CHALLENGE' as const, rarity: 'UNCOMMON' as const, points: 100 },
+    { key: 'share_run', name: 'Show & Tell', description: 'Share a completed run publicly', icon: '📢', category: 'SOCIAL' as const, rarity: 'COMMON' as const, points: 25 },
+  ];
+
+  for (const ach of achievementDefs) {
+    await prisma.achievement.upsert({
+      where: { key: ach.key },
+      update: ach,
+      create: ach,
+    });
+  }
+  console.log(`Seeded ${achievementDefs.length} achievements`);
+
   console.log('Seeding complete!');
 }
 
