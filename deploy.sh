@@ -363,27 +363,40 @@ log_step "BUILDING AND STARTING DOCKER SERVICES"
 cd "$PROJECT_DIR"
 
 log_info "Building Docker images (this may take a few minutes on first run)..."
-$COMPOSE_CMD build --no-cache 2>&1 | tail -5
+$COMPOSE_CMD build 2>&1 | tail -20
+if [ $? -ne 0 ]; then
+    log_error "Docker build failed. Check the output above for details."
+    exit 1
+fi
+
+log_info "Building tools image for migrations and seeding..."
+$COMPOSE_CMD --profile migrate build migrate 2>&1 | tail -10
 
 log_info "Starting services..."
 $COMPOSE_CMD down 2>/dev/null || true
 $COMPOSE_CMD up -d
 
 log_info "Waiting for database to be ready..."
-sleep 10
+for i in $(seq 1 30); do
+    if $COMPOSE_CMD exec -T db pg_isready -U nuzlocke -d nuzlocke_hub &>/dev/null; then
+        log_ok "Database is ready"
+        break
+    fi
+    sleep 2
+done
 
 # ─── Database Migration and Seeding ─────────────────────────────────────
 log_step "DATABASE INITIALIZATION"
 
 log_info "Running database schema push..."
-$COMPOSE_CMD run --rm migrate 2>&1 | tail -5 || {
+$COMPOSE_CMD --profile migrate run --rm migrate 2>&1 | tail -10 || {
     log_warn "Schema push via migrate service failed, trying direct..."
     $COMPOSE_CMD exec -T app npx prisma db push --accept-data-loss 2>/dev/null || true
 }
 log_ok "Database schema applied"
 
 log_info "Seeding database with games and demo data..."
-$COMPOSE_CMD run --rm seed 2>&1 | tail -10 || {
+$COMPOSE_CMD --profile seed run --rm seed 2>&1 | tail -10 || {
     log_warn "Seed via seed service failed, trying direct..."
     $COMPOSE_CMD exec -T app npx tsx scripts/seed.ts 2>/dev/null || true
 }

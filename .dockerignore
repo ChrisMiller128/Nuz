@@ -1,0 +1,13 @@
+.git
+.next
+node_modules
+storage/base-roms/*
+storage/generated-roms/*
+storage/saves/*
+storage/screenshots/*
+storage/tmp/*
+!storage/**/.gitkeep
+.env
+.env.local
+.env.*.local
+deploy.sh

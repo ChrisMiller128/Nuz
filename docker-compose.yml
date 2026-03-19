@@ -44,7 +44,7 @@ services:
   migrate:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.tools
     depends_on:
       db:
         condition: service_healthy
@@ -57,7 +57,7 @@ services:
   seed:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.tools
     depends_on:
       db:
         condition: service_healthy
