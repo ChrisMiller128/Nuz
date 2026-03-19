@@ -1,0 +1,312 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  username      String         @unique
+  passwordHash  String
+  avatarUrl     String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  runs          Run[]
+  generatedRoms GeneratedRom[]
+  saveStates    SaveState[]
+  deviceSessions DeviceSession[]
+
+  @@index([email])
+  @@index([username])
+}
+
+model Game {
+  id          String    @id @default(cuid())
+  title       String
+  slug        String    @unique
+  platform    Platform
+  generation  Int
+  region      String    @default("unknown")
+  description String?
+  coverArt    String?
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  baseRoms    BaseRom[]
+  runs        Run[]
+
+  @@index([platform])
+  @@index([slug])
+}
+
+model BaseRom {
+  id            String         @id @default(cuid())
+  gameId        String
+  game          Game           @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  fileName      String
+  fileSize      BigInt
+  checksum      String
+  storagePath   String
+  version       String         @default("1.0")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  generatedRoms GeneratedRom[]
+  runs          Run[]
+
+  @@index([gameId])
+  @@index([checksum])
+}
+
+model GeneratedRom {
+  id                    String            @id @default(cuid())
+  userId                String
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  baseRomId             String
+  baseRom               BaseRom           @relation(fields: [baseRomId], references: [id], onDelete: Cascade)
+  generatorProfileId    String?
+  generatorProfile      GeneratorProfile? @relation(fields: [generatorProfileId], references: [id], onDelete: SetNull)
+  generatorSettingsJson Json
+  seed                  String
+  checksum              String
+  storagePath           String
+  fileName              String
+  fileSize              BigInt
+  status                GeneratedRomStatus @default(READY)
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  runs                  Run[]
+  saveStates            SaveState[]
+
+  @@index([userId])
+  @@index([baseRomId])
+  @@index([checksum])
+}
+
+model GeneratorProfile {
+  id            String         @id @default(cuid())
+  name          String
+  description   String?
+  rulesPreset   RulesPreset
+  settingsJson  Json
+  isDefault     Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  generatedRoms GeneratedRom[]
+
+  @@index([rulesPreset])
+}
+
+model Run {
+  id              String        @id @default(cuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId          String
+  game            Game          @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  baseRomId       String
+  baseRom         BaseRom       @relation(fields: [baseRomId], references: [id], onDelete: Cascade)
+  generatedRomId  String
+  generatedRom    GeneratedRom  @relation(fields: [generatedRomId], references: [id], onDelete: Cascade)
+  name            String
+  rulesPreset     RulesPreset
+  customRulesJson Json?
+  status          RunStatus     @default(ACTIVE)
+  starterChoice   String?
+  duplicateClause Boolean       @default(true)
+  shinyClause     Boolean       @default(false)
+  staticEncounters Boolean      @default(true)
+  giftPokemon     GiftRule      @default(ALLOWED)
+  currentBadges   Int           @default(0)
+  deathCount      Int           @default(0)
+  playTimeSeconds BigInt        @default(0)
+  lastPlayedAt    DateTime?
+  completedAt     DateTime?
+  failedAt        DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  saveStates      SaveState[]
+  encounters      Encounter[]
+  pokemonEntries  PokemonEntry[]
+  badgeProgress   BadgeProgress[]
+  runNotes        RunNote[]
+
+  @@index([userId])
+  @@index([gameId])
+  @@index([status])
+  @@index([lastPlayedAt])
+}
+
+model SaveState {
+  id             String       @id @default(cuid())
+  runId          String
+  run            Run          @relation(fields: [runId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generatedRomId String
+  generatedRom   GeneratedRom @relation(fields: [generatedRomId], references: [id], onDelete: Cascade)
+  slotNumber     Int          @default(0)
+  isAutosave     Boolean      @default(false)
+  storagePath    String
+  fileName       String
+  fileSize       BigInt
+  checksum       String
+  screenshotPath String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([runId])
+  @@index([userId])
+  @@unique([runId, slotNumber])
+}
+
+model Encounter {
+  id           String          @id @default(cuid())
+  runId        String
+  run          Run             @relation(fields: [runId], references: [id], onDelete: Cascade)
+  routeName    String
+  pokemonName  String?
+  pokemonLevel Int?
+  status       EncounterStatus @default(PENDING)
+  isStatic     Boolean         @default(false)
+  isGift       Boolean         @default(false)
+  notes        String?
+  order        Int             @default(0)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([runId])
+  @@index([routeName])
+}
+
+model PokemonEntry {
+  id           String        @id @default(cuid())
+  runId        String
+  run          Run           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  nickname     String
+  species      String
+  level        Int           @default(5)
+  status       PokemonStatus @default(ALIVE)
+  location     PokemonLocation @default(PARTY)
+  metRoute     String?
+  metLevel     Int?
+  nature       String?
+  ability      String?
+  causeOfDeath String?
+  diedToTrainer String?
+  diedAtRoute  String?
+  diedAtLevel  Int?
+  order        Int           @default(0)
+  notes        String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([runId])
+  @@index([status])
+}
+
+model BadgeProgress {
+  id          String   @id @default(cuid())
+  runId       String
+  run         Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  badgeName   String
+  badgeNumber Int
+  gymLeader   String?
+  levelCap    Int?
+  obtained    Boolean  @default(false)
+  obtainedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([runId])
+  @@unique([runId, badgeNumber])
+}
+
+model RunNote {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  title     String?
+  content   String
+  noteType  NoteType @default(GENERAL)
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([runId])
+}
+
+model DeviceSession {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceName  String?
+  userAgent   String?
+  lastActiveAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+}
+
+enum Platform {
+  GB
+  GBC
+  GBA
+  NDS
+}
+
+enum RunStatus {
+  ACTIVE
+  COMPLETED
+  FAILED
+  ABANDONED
+}
+
+enum RulesPreset {
+  CLASSIC
+  HARDCORE
+  CUSTOM
+}
+
+enum GiftRule {
+  ALLOWED
+  FIRST_ONLY
+  BANNED
+}
+
+enum EncounterStatus {
+  PENDING
+  CAUGHT
+  MISSED
+  FAILED
+  SKIPPED
+}
+
+enum PokemonStatus {
+  ALIVE
+  DEAD
+  RELEASED
+}
+
+enum PokemonLocation {
+  PARTY
+  BOX
+  GRAVEYARD
+}
+
+enum NoteType {
+  GENERAL
+  MILESTONE
+  DEATH
+  BADGE
+  STRATEGY
+}
+
+enum GeneratedRomStatus {
+  GENERATING
+  READY
+  FAILED
+  ARCHIVED
+}
