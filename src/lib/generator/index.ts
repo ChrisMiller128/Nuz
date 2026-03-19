@@ -3,6 +3,8 @@ import path from 'path';
 import crypto from 'crypto';
 import { computeChecksum, StoragePaths, getUserStoragePath } from '../storage';
 import prisma from '../prisma';
+import { randomizeGen1 } from './randomizers/gen1';
+import { randomizeGen3 } from './randomizers/gen3';
 
 export interface GeneratorSettings {
   randomizeStarters: boolean;
@@ -80,76 +82,41 @@ function generateSeed(): string {
   return crypto.randomBytes(8).toString('hex');
 }
 
+type Platform = 'GB' | 'GBC' | 'GBA' | 'NDS';
+
 /**
- * Applies deterministic byte-level modifications to a ROM buffer
- * using a seeded PRNG for reproducibility. This is a first-pass
- * implementation; the architecture supports swapping in real
- * Pokémon randomizer logic (e.g. Universal Pokemon Randomizer ZX)
- * as a subprocess or WASM module.
+ * Applies real Pokemon randomization to a ROM buffer based on the platform.
+ * Uses platform-specific randomizers that understand the ROM data structures
+ * for each generation of Pokemon games.
+ *
+ * - Gen 1 (GB/GBC): Modifies wild encounter tables, starters, trainer Pokemon
+ * - Gen 3 (GBA): Modifies wild encounter tables, starters, trainer Pokemon
+ * - Gen 4/5 (NDS): Falls back to signature-only (complex compressed formats)
  */
 function applyGeneratorModifications(
   romBuffer: Buffer,
   settings: GeneratorSettings,
-  seed: string
+  seed: string,
+  platform: Platform
 ): Buffer {
-  const modified = Buffer.from(romBuffer);
-
-  const seedHash = crypto.createHash('sha256').update(seed).digest();
-  let prngIndex = 0;
-
-  function nextByte(): number {
-    const b = seedHash[(prngIndex++) % seedHash.length];
-    if (prngIndex % seedHash.length === 0) {
-      const rehash = crypto.createHash('sha256').update(seedHash).update(Buffer.from([prngIndex & 0xff])).digest();
-      seedHash.copy(rehash, 0, 0, seedHash.length > rehash.length ? rehash.length : seedHash.length);
-    }
-    return b;
-  }
-
-  // Embed the seed and settings fingerprint into a safe region of the ROM header area
-  const settingsFingerprint = crypto
-    .createHash('md5')
-    .update(JSON.stringify(settings))
-    .update(seed)
-    .digest();
-
-  // Write a signature block at the end of the ROM if there's space
-  const signatureTag = Buffer.from('NUZLOCKE_HUB_GEN');
-  if (modified.length > signatureTag.length + settingsFingerprint.length + 256) {
-    const offset = modified.length - signatureTag.length - settingsFingerprint.length - 64;
-    signatureTag.copy(modified, offset);
-    settingsFingerprint.copy(modified, offset + signatureTag.length);
-  }
-
-  // Apply seeded modifications based on settings
-  if (settings.levelScaling !== 1.0) {
-    const scalingByte = Math.round(settings.levelScaling * 100) & 0xff;
-    for (let i = 0; i < 16 && i < modified.length - 128; i++) {
-      const targetOffset = 0x100 + i * 8 + (nextByte() % 4);
-      if (targetOffset < modified.length) {
-        modified[targetOffset] = (modified[targetOffset] ^ scalingByte) & 0xff;
+  switch (platform) {
+    case 'GB':
+    case 'GBC':
+      return randomizeGen1(romBuffer, settings, seed);
+    case 'GBA':
+      return randomizeGen3(romBuffer, settings, seed);
+    case 'NDS':
+    default: {
+      // NDS ROMs use compressed overlays; real randomization requires
+      // decompression support. For now, write a metadata signature only.
+      const modified = Buffer.from(romBuffer);
+      const sig = Buffer.from(`NUZN|${seed}|0`);
+      if (modified.length > sig.length + 256) {
+        sig.copy(modified, modified.length - sig.length - 64);
       }
+      return modified;
     }
   }
-
-  if (settings.randomizeWildPokemon || settings.randomizeTrainers || settings.randomizeStarters) {
-    const modCount = settings.randomizeWildPokemon ? 32 : 16;
-    for (let i = 0; i < modCount && modified.length > 512; i++) {
-      const region = 0x200 + (nextByte() * 256 + nextByte()) % Math.max(1, modified.length - 0x200);
-      if (region < modified.length) {
-        modified[region] = nextByte();
-      }
-    }
-  }
-
-  if (settings.expModifier !== 1.0) {
-    const expByte = Math.round(settings.expModifier * 100) & 0xff;
-    if (modified.length > 0x180) {
-      modified[0x150] = expByte;
-    }
-  }
-
-  return modified;
 }
 
 export interface GenerateRomResult {
@@ -187,16 +154,13 @@ export async function generateRom(params: {
   try {
     romBuffer = await fs.readFile(baseRom.storagePath);
   } catch {
-    // If base ROM file doesn't exist yet (demo mode), create a synthetic ROM
-    const syntheticSize = 1024 * 256; // 256KB
-    romBuffer = crypto.pseudoRandomBytes(syntheticSize);
-    // Write a valid-ish header
-    const header = Buffer.from(`NUZLOCKE_HUB_BASE_${baseRom.game.slug.toUpperCase().padEnd(12, '_')}`);
-    header.copy(romBuffer, 0);
+    throw new Error(`Base ROM file not found at ${baseRom.storagePath}. Please upload the ROM file first.`);
   }
 
-  // Apply generator modifications
-  const modifiedRom = applyGeneratorModifications(romBuffer, settings, seed);
+  const platform = baseRom.game.platform as Platform;
+
+  // Apply real Pokemon randomization based on platform
+  const modifiedRom = applyGeneratorModifications(romBuffer, settings, seed, platform);
 
   // Compute checksum of the generated ROM
   const checksum = computeChecksum(modifiedRom);
