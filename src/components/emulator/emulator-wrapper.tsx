@@ -33,7 +33,7 @@ export function EmulatorWrapper({
     try {
       const core = getCoreForPlatform(platform);
 
-      const w = window as Record<string, unknown>;
+      const w = window as unknown as Record<string, unknown>;
       w.EJS_player = '#emulator-game';
       w.EJS_core = core;
       w.EJS_gameUrl = romUrl;
@@ -71,7 +71,7 @@ export function EmulatorWrapper({
 
     const interval = setInterval(async () => {
       try {
-        const w = window as Record<string, unknown>;
+        const w = window as unknown as Record<string, unknown>;
         const ejs = w.EJS_emulator as { getState?: () => ArrayBuffer } | undefined;
         if (ejs?.getState) {
           const state = ejs.getState();
@@ -116,7 +116,7 @@ export function EmulatorWrapper({
           <button
             onClick={async () => {
               if (onSaveState) {
-                const w = window as Record<string, unknown>;
+                const w = window as unknown as Record<string, unknown>;
                 const ejs = w.EJS_emulator as { getState?: () => ArrayBuffer } | undefined;
                 if (ejs?.getState) {
                   const state = ejs.getState();

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { AppShell } from '@/components/layout/app-shell';
@@ -16,6 +16,14 @@ interface GameOption {
 }
 
 export default function NewRunPage() {
+  return (
+    <Suspense fallback={<AppShell><LoadingScreen message="Loading..." /></AppShell>}>
+      <NewRunPageInner />
+    </Suspense>
+  );
+}
+
+function NewRunPageInner() {
   const { status } = useSession();
   const router = useRouter();
   const searchParams = useSearchParams();
