@@ -273,18 +273,110 @@ ENVEOF
 chmod 600 "$ENV_FILE"
 log_ok "Environment file created at $ENV_FILE"
 
-# ─── Configure Nginx ────────────────────────────────────────────────────
-log_step "CONFIGURING NGINX"
+# ─── Configure Reverse Proxy (Caddy or Nginx) ───────────────────────────
+log_step "CONFIGURING REVERSE PROXY"
 
-NGINX_CONF="/etc/nginx/sites-available/${DOMAIN}"
-NGINX_LINK="/etc/nginx/sites-enabled/${DOMAIN}"
-
-if [ -f "$NGINX_CONF" ]; then
-    log_info "Backing up existing nginx config..."
-    cp "$NGINX_CONF" "${NGINX_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+# Detect what is currently on port 80
+PORT80_PID=$(ss -tlnp 'sport = :80' 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+PORT80_PROC=""
+if [ -n "$PORT80_PID" ]; then
+    PORT80_PROC=$(ps -p "$PORT80_PID" -o comm= 2>/dev/null || true)
 fi
 
-cat > "$NGINX_CONF" <<'NGINXEOF'
+if command -v caddy &>/dev/null || [ "$PORT80_PROC" = "caddy" ]; then
+    # ─── Caddy path ─────────────────────────────────────────────────
+    log_info "Caddy detected as the active reverse proxy"
+    USE_CADDY=true
+
+    CADDYFILE="/etc/caddy/Caddyfile"
+    CADDY_SNIPPET="${PROJECT_DIR}/caddy-site.conf"
+
+    # Write the site block for this domain
+    cat > "$CADDY_SNIPPET" <<CADDYEOF
+${DOMAIN} {
+    reverse_proxy 127.0.0.1:3000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+    request_body {
+        max_size 64MB
+    }
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=63072000"
+    }
+    @static path /_next/static/*
+    header @static Cache-Control "public, max-age=31536000, immutable"
+}
+CADDYEOF
+    log_ok "Caddy site config written to $CADDY_SNIPPET"
+
+    # Check if the domain is already in the Caddyfile
+    if [ -f "$CADDYFILE" ]; then
+        if grep -q "${DOMAIN}" "$CADDYFILE" 2>/dev/null; then
+            log_info "Domain already present in $CADDYFILE — replacing block"
+            # Back up before modifying
+            cp "$CADDYFILE" "${CADDYFILE}.backup.$(date +%Y%m%d_%H%M%S)"
+            # Remove old block (everything between "nuzlocke.emulator.st {" and its closing "}")
+            # Use a temp file approach for safety
+            python3 -c "
+import re, sys
+with open('$CADDYFILE') as f:
+    content = f.read()
+pattern = r'${DOMAIN}\s*\{[^}]*(?:\{[^}]*\}[^}]*)*\}\n?'
+content = re.sub(pattern, '', content)
+with open('$CADDYFILE', 'w') as f:
+    f.write(content)
+" 2>/dev/null || {
+                log_warn "Could not auto-remove old block — appending new one"
+            }
+        fi
+        # Append the new site block
+        echo "" >> "$CADDYFILE"
+        cat "$CADDY_SNIPPET" >> "$CADDYFILE"
+        log_ok "Site block appended to $CADDYFILE"
+    else
+        log_warn "$CADDYFILE not found — creating it"
+        cp "$CADDY_SNIPPET" "$CADDYFILE"
+        log_ok "Created $CADDYFILE"
+    fi
+
+    # Validate and reload Caddy
+    if caddy validate --config "$CADDYFILE" --adapter caddyfile 2>/dev/null; then
+        caddy reload --config "$CADDYFILE" --adapter caddyfile 2>/dev/null \
+            || systemctl reload caddy 2>/dev/null \
+            || systemctl restart caddy 2>/dev/null \
+            || true
+        log_ok "Caddy configuration reloaded (SSL is automatic)"
+    else
+        log_warn "Caddy config validation failed — check $CADDYFILE"
+        log_warn "You may need to manually add the block from $CADDY_SNIPPET"
+    fi
+
+    # Disable nginx for this site if it was previously configured
+    if [ -L "/etc/nginx/sites-enabled/${DOMAIN}" ]; then
+        rm -f "/etc/nginx/sites-enabled/${DOMAIN}"
+        nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
+        log_info "Removed old nginx site config for ${DOMAIN}"
+    fi
+
+else
+    # ─── Nginx path ─────────────────────────────────────────────────
+    USE_CADDY=false
+    log_info "Using Nginx as reverse proxy"
+
+    NGINX_CONF="/etc/nginx/sites-available/${DOMAIN}"
+    NGINX_LINK="/etc/nginx/sites-enabled/${DOMAIN}"
+
+    if [ -f "$NGINX_CONF" ]; then
+        log_info "Backing up existing nginx config..."
+        cp "$NGINX_CONF" "${NGINX_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+    fi
+
+    cat > "$NGINX_CONF" <<'NGINXEOF'
 server {
     listen 80;
     listen [::]:80;
@@ -322,38 +414,37 @@ server {
 }
 NGINXEOF
 
-# Enable site
-if [ ! -L "$NGINX_LINK" ]; then
-    ln -sf "$NGINX_CONF" "$NGINX_LINK"
-    log_ok "Nginx site enabled"
-else
-    log_ok "Nginx site symlink already exists"
-fi
-
-# Test and reload nginx
-if nginx -t 2>/dev/null; then
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-    log_ok "Nginx configuration valid and reloaded"
-else
-    log_warn "Nginx configuration test failed — check /etc/nginx/sites-available/${DOMAIN}"
-fi
-
-# ─── SSL Certificate ────────────────────────────────────────────────────
-log_step "SSL CERTIFICATE"
-
-if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
-    log_ok "SSL certificate already exists for ${DOMAIN}"
-else
-    log_info "Attempting to obtain SSL certificate for ${DOMAIN}..."
-    log_info "This requires DNS to be pointing to this server."
-
-    if certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos \
-        --register-unsafely-without-email --redirect 2>/dev/null; then
-        log_ok "SSL certificate obtained and nginx configured"
+    if [ ! -L "$NGINX_LINK" ]; then
+        ln -sf "$NGINX_CONF" "$NGINX_LINK"
+        log_ok "Nginx site enabled"
     else
-        log_warn "SSL certificate request failed."
-        log_warn "This is normal if DNS is not yet pointing to this server."
-        log_warn "Run manually later: certbot --nginx -d ${DOMAIN}"
+        log_ok "Nginx site symlink already exists"
+    fi
+
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+        log_ok "Nginx configuration valid and reloaded"
+    else
+        log_warn "Nginx configuration test failed"
+    fi
+
+    # ─── SSL Certificate (Nginx only — Caddy handles SSL automatically) ──
+    log_step "SSL CERTIFICATE"
+
+    if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
+        log_ok "SSL certificate already exists for ${DOMAIN}"
+    else
+        log_info "Attempting to obtain SSL certificate for ${DOMAIN}..."
+        log_info "This requires DNS to be pointing to this server."
+
+        if certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos \
+            --register-unsafely-without-email --redirect 2>/dev/null; then
+            log_ok "SSL certificate obtained and nginx configured"
+        else
+            log_warn "SSL certificate request failed."
+            log_warn "This is normal if DNS is not yet pointing to this server."
+            log_warn "Run manually later: certbot --nginx -d ${DOMAIN}"
+        fi
     fi
 fi
 
@@ -414,14 +505,21 @@ else
     log_info "Check logs with: cd $PROJECT_DIR && $COMPOSE_CMD logs -f app"
 fi
 
-if curl -sf -o /dev/null "http://${DOMAIN}" 2>/dev/null; then
-    log_ok "Nginx proxy is working for http://${DOMAIN}"
+if curl -sf -o /dev/null "https://${DOMAIN}" 2>/dev/null; then
+    log_ok "Reverse proxy is working for https://${DOMAIN}"
+elif curl -sf -o /dev/null "http://${DOMAIN}" 2>/dev/null; then
+    log_ok "Reverse proxy is working for http://${DOMAIN} (SSL may still be provisioning)"
 else
-    log_warn "Nginx proxy check inconclusive (DNS may not be configured yet)"
+    log_warn "Reverse proxy check inconclusive (DNS may not be configured yet)"
 fi
 
 # ─── Print Status ────────────────────────────────────────────────────────
 log_step "DEPLOYMENT COMPLETE"
+
+PROXY_NAME="Nginx"
+if [ "${USE_CADDY:-false}" = "true" ]; then
+    PROXY_NAME="Caddy (auto-SSL)"
+fi
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
@@ -430,6 +528,7 @@ echo -e "${GREEN}╠════════════════════
 echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  ${CYAN}Application URL:${NC}  https://${DOMAIN}              ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  ${CYAN}Direct URL:${NC}       http://127.0.0.1:3000                ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  ${CYAN}Reverse Proxy:${NC}    ${PROXY_NAME}                              ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  ${CYAN}Project Dir:${NC}      ${PROJECT_DIR}                  ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  ${CYAN}Demo Account:${NC}                                          ${GREEN}║${NC}"
@@ -439,11 +538,15 @@ echo -e "${GREEN}║${NC}                                                       
 echo -e "${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC}  ${YELLOW}NEXT STEPS:${NC}                                              ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
-echo -e "${GREEN}║${NC}  1. Point DNS A record for ${DOMAIN}            ${GREEN}║${NC}"
-echo -e "${GREEN}║${NC}     to this server's IP address                              ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}  1. Ensure DNS A record for ${DOMAIN}           ${GREEN}║${NC}"
+echo -e "${GREEN}║${NC}     points to this server's IP address                       ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
+if [ "${USE_CADDY:-false}" = "true" ]; then
+echo -e "${GREEN}║${NC}  2. Caddy handles SSL automatically once DNS is live         ${GREEN}║${NC}"
+else
 echo -e "${GREEN}║${NC}  2. If SSL failed, run after DNS is ready:                   ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}     certbot --nginx -d ${DOMAIN}                ${GREEN}║${NC}"
+fi
 echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}  3. Place your own legal ROM files in:                       ${GREEN}║${NC}"
 echo -e "${GREEN}║${NC}     ${PROJECT_DIR}/storage/base-roms/             ${GREEN}║${NC}"
