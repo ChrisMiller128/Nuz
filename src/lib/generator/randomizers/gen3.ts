@@ -4,313 +4,264 @@ import type { GeneratorSettings } from '../index';
 /**
  * Gen 3 Pokemon Randomizer (Ruby, Sapphire, Emerald, FireRed, LeafGreen)
  *
- * GBA Pokemon games store data in well-documented structures.
- * Species IDs are 16-bit values (little-endian) matching National Dex numbers.
- * This randomizer modifies wild encounters, starters, and trainer Pokemon.
+ * Uses ROM header identification + targeted data searches rather
+ * than broad heuristic scanning. GBA ROMs store encounter data
+ * in well-documented pointer table structures.
  */
 
-// Valid Gen 3 species: National Dex 1-386 (Gen I through III)
 const MAX_SPECIES = 386;
-const MIN_SPECIES = 1;
-
-// Legendaries and mythicals to exclude from random encounters
 const LEGENDARIES = new Set([
-  144, 145, 146, 150, 151, // Gen 1
-  243, 244, 245, 249, 250, 251, // Gen 2
-  377, 378, 379, 380, 381, 382, 383, 384, 385, 386, // Gen 3
+  144, 145, 146, 150, 151, 243, 244, 245, 249, 250, 251,
+  377, 378, 379, 380, 381, 382, 383, 384, 385, 386,
 ]);
 
-function getEncounterPool(): number[] {
-  const pool: number[] = [];
-  for (let i = MIN_SPECIES; i <= MAX_SPECIES; i++) {
-    if (!LEGENDARIES.has(i)) pool.push(i);
-  }
-  return pool;
+const ENCOUNTER_POOL: number[] = [];
+for (let i = 1; i <= MAX_SPECIES; i++) {
+  if (!LEGENDARIES.has(i)) ENCOUNTER_POOL.push(i);
 }
 
-const ENCOUNTER_POOL = getEncounterPool();
-
-/** Read a 16-bit little-endian value */
 function readU16(rom: Buffer, offset: number): number {
   return rom[offset] | (rom[offset + 1] << 8);
 }
 
-/** Write a 16-bit little-endian value */
 function writeU16(rom: Buffer, offset: number, value: number): void {
   rom[offset] = value & 0xff;
   rom[offset + 1] = (value >> 8) & 0xff;
 }
 
-/** Read a 32-bit little-endian value */
 function readU32(rom: Buffer, offset: number): number {
-  return rom[offset] | (rom[offset + 1] << 8) | (rom[offset + 2] << 16) | (rom[offset + 3] << 24);
+  return (rom[offset] | (rom[offset + 1] << 8) | (rom[offset + 2] << 16) | (rom[offset + 3] << 24)) >>> 0;
 }
 
-/**
- * GBA ROM addresses use 0x08000000 as the base. Convert pointer to file offset.
- */
 function ptrToOffset(ptr: number): number {
-  if (ptr >= 0x08000000 && ptr < 0x0A000000) {
-    return ptr - 0x08000000;
-  }
+  if (ptr >= 0x08000000 && ptr < 0x0A000000) return ptr - 0x08000000;
   return -1;
 }
 
-/**
- * Wild encounter data in Gen 3 has a specific structure:
- * - For each map: pointer to encounter data block
- * - Each block: [bank, map, padding, padding, grass_ptr, water_ptr, rock_ptr, fish_ptr]
- * - Grass block: [encounter_rate (4 bytes), then 12 entries of (min_level, max_level, species(2), padding(2))]
- * - Water block: similar with 5 entries
- * - Fishing block: similar with 10 entries
- *
- * We scan for the encounter table header to find all tables.
- */
+function getGameCode(rom: Buffer): string {
+  return rom.subarray(0xAC, 0xB0).toString('ascii');
+}
 
-interface WildEncounterEntry {
-  offset: number; // offset of the species u16 in ROM
+/**
+ * Known wild encounter table header pointers for specific games.
+ * These point to the array of encounter set headers.
+ */
+const KNOWN_ENCOUNTER_TABLE_PTRS: Record<string, number> = {
+  'BPEE': 0x552D48, // Emerald (USA)
+  'BPEJ': 0x552D48, // Emerald (JPN)
+  'AXVE': 0x3C9CB8, // Ruby (USA)
+  'AXPE': 0x3C9D18, // Sapphire (USA)
+  'BPRE': 0x3C9358, // FireRed (USA)
+  'BPGE': 0x3C9874, // LeafGreen (USA)
+};
+
+interface EncounterSlot {
+  speciesOffset: number;
   minLevelOffset: number;
   maxLevelOffset: number;
 }
 
 /**
- * Searches for wild encounter table structures in the ROM.
- * Each grass encounter entry is 8 bytes: [min_level, max_level, species (u16), padding (u16)]
- * Grass tables have 12 entries, water/rock have 5, fishing has 10.
+ * Finds all encounter slots by following the encounter table pointer structure.
+ * Each header: [bank(1), map(1), pad(2), grass_ptr(4), water_ptr(4), rock_ptr(4), fish_ptr(4)]
  */
-function findWildEncounterTables(rom: Buffer): WildEncounterEntry[] {
-  const entries: WildEncounterEntry[] = [];
+function findEncounterSlots(rom: Buffer): EncounterSlot[] {
+  const slots: EncounterSlot[] = [];
+  const gameCode = getGameCode(rom);
 
-  // Strategy: find the wild encounter header table by searching for a sequence
-  // of valid GBA pointers followed by encounter data.
-  // Emerald's wild data header table is near 0x552D48.
-  // We scan a wider range to support different versions.
+  // Try known pointer first
+  let headerTableOffset: number | null = KNOWN_ENCOUNTER_TABLE_PTRS[gameCode] ?? null;
 
-  const searchRanges = [
-    [0x540000, 0x560000], // Emerald region
-    [0x3C0000, 0x3E0000], // Ruby/Sapphire region
-    [0x3C0000, 0x400000], // FireRed/LeafGreen region
-  ];
-
-  for (const [start, end] of searchRanges) {
-    if (end > rom.length) continue;
-
-    for (let i = start; i < end - 20; i++) {
-      // Look for encounter header: bank(1), map(1), pad(2), 4 pointers
-      const ptr1 = readU32(rom, i + 4);
-      const ptr2 = readU32(rom, i + 8);
-      const ptr3 = readU32(rom, i + 12);
-      const ptr4 = readU32(rom, i + 16);
-
-      // At least one pointer should be valid, others can be 0 (no encounters of that type)
-      const validPtrs = [ptr1, ptr2, ptr3, ptr4].filter(
-        p => p === 0 || (ptrToOffset(p) > 0 && ptrToOffset(p) < rom.length - 100)
-      );
-
-      if (validPtrs.length < 4) continue;
-      const nonZero = [ptr1, ptr2, ptr3, ptr4].filter(p => p !== 0);
-      if (nonZero.length === 0) continue;
-
-      // Try to read grass encounters (ptr1)
-      if (ptr1 !== 0) {
-        const grassOffset = ptrToOffset(ptr1);
-        if (grassOffset > 0 && grassOffset < rom.length - 100) {
-          // Skip 4-byte encounter rate, then 12 entries of 8 bytes each
-          const dataStart = grassOffset + 4;
-          let allValid = true;
-
-          for (let e = 0; e < 12; e++) {
-            const entryOff = dataStart + e * 8;
-            if (entryOff + 4 > rom.length) { allValid = false; break; }
-
-            const minLv = rom[entryOff];
-            const maxLv = rom[entryOff + 1];
-            const species = readU16(rom, entryOff + 2);
-
-            if (minLv < 2 || minLv > 70 || maxLv < 2 || maxLv > 70) { allValid = false; break; }
-            if (minLv > maxLv) { allValid = false; break; }
-            if (species < 1 || species > MAX_SPECIES) { allValid = false; break; }
-          }
-
-          if (allValid) {
-            for (let e = 0; e < 12; e++) {
-              const entryOff = dataStart + e * 8;
-              entries.push({
-                offset: entryOff + 2,
-                minLevelOffset: entryOff,
-                maxLevelOffset: entryOff + 1,
-              });
-            }
-          }
-        }
-      }
-
-      // Water encounters (ptr2) - 5 entries
-      if (ptr2 !== 0) {
-        const waterOffset = ptrToOffset(ptr2);
-        if (waterOffset > 0 && waterOffset < rom.length - 50) {
-          const dataStart = waterOffset + 4;
-          let allValid = true;
-
-          for (let e = 0; e < 5; e++) {
-            const entryOff = dataStart + e * 8;
-            if (entryOff + 4 > rom.length) { allValid = false; break; }
-            const minLv = rom[entryOff];
-            const maxLv = rom[entryOff + 1];
-            const species = readU16(rom, entryOff + 2);
-            if (minLv < 2 || minLv > 70 || maxLv < minLv || species < 1 || species > MAX_SPECIES) {
-              allValid = false; break;
-            }
-          }
-
-          if (allValid) {
-            for (let e = 0; e < 5; e++) {
-              const entryOff = dataStart + e * 8;
-              entries.push({
-                offset: entryOff + 2,
-                minLevelOffset: entryOff,
-                maxLevelOffset: entryOff + 1,
-              });
-            }
-          }
-        }
-      }
-
-      // Fishing encounters (ptr4) - 10 entries
-      if (ptr4 !== 0) {
-        const fishOffset = ptrToOffset(ptr4);
-        if (fishOffset > 0 && fishOffset < rom.length - 90) {
-          const dataStart = fishOffset + 4;
-          let allValid = true;
-
-          for (let e = 0; e < 10; e++) {
-            const entryOff = dataStart + e * 8;
-            if (entryOff + 4 > rom.length) { allValid = false; break; }
-            const minLv = rom[entryOff];
-            const maxLv = rom[entryOff + 1];
-            const species = readU16(rom, entryOff + 2);
-            if (minLv < 2 || minLv > 70 || maxLv < minLv || species < 1 || species > MAX_SPECIES) {
-              allValid = false; break;
-            }
-          }
-
-          if (allValid) {
-            for (let e = 0; e < 10; e++) {
-              const entryOff = dataStart + e * 8;
-              entries.push({
-                offset: entryOff + 2,
-                minLevelOffset: entryOff,
-                maxLevelOffset: entryOff + 1,
-              });
-            }
-          }
-        }
-      }
-    }
+  // If not known, search for the encounter table by looking for a sequence
+  // of valid encounter headers
+  if (!headerTableOffset || headerTableOffset >= rom.length) {
+    headerTableOffset = searchForEncounterTable(rom);
   }
 
-  return entries;
+  if (!headerTableOffset) {
+    console.log('[Gen3 Randomizer] Could not find encounter table pointer');
+    return slots;
+  }
+
+  console.log(`[Gen3 Randomizer] Encounter table at 0x${headerTableOffset.toString(16)}`);
+
+  // Each header is 20 bytes
+  let offset = headerTableOffset;
+  let tableCount = 0;
+
+  while (offset + 20 <= rom.length && tableCount < 200) {
+    const grassPtr = readU32(rom, offset + 4);
+    const waterPtr = readU32(rom, offset + 8);
+    const rockPtr = readU32(rom, offset + 12);
+    const fishPtr = readU32(rom, offset + 16);
+
+    // End of table marker (all zeros or invalid)
+    if (grassPtr === 0 && waterPtr === 0 && rockPtr === 0 && fishPtr === 0) {
+      // Check if next header is also all zeros (end of table)
+      const nextGrass = readU32(rom, offset + 24);
+      if (nextGrass === 0) break;
+    }
+
+    // Parse grass encounters (12 entries, each 8 bytes: minLv, maxLv, species(u16), pad(u16), pad(u16))
+    if (grassPtr !== 0) {
+      const grassOff = ptrToOffset(grassPtr);
+      if (grassOff > 0 && grassOff + 100 < rom.length) {
+        parseEncounterBlock(rom, grassOff, 12, slots);
+      }
+    }
+
+    // Water encounters (5 entries)
+    if (waterPtr !== 0) {
+      const waterOff = ptrToOffset(waterPtr);
+      if (waterOff > 0 && waterOff + 44 < rom.length) {
+        parseEncounterBlock(rom, waterOff, 5, slots);
+      }
+    }
+
+    // Rock smash encounters (5 entries)
+    if (rockPtr !== 0) {
+      const rockOff = ptrToOffset(rockPtr);
+      if (rockOff > 0 && rockOff + 44 < rom.length) {
+        parseEncounterBlock(rom, rockOff, 5, slots);
+      }
+    }
+
+    // Fishing encounters (10 entries)
+    if (fishPtr !== 0) {
+      const fishOff = ptrToOffset(fishPtr);
+      if (fishOff > 0 && fishOff + 84 < rom.length) {
+        parseEncounterBlock(rom, fishOff, 10, slots);
+      }
+    }
+
+    offset += 20;
+    tableCount++;
+  }
+
+  return slots;
+}
+
+function parseEncounterBlock(rom: Buffer, blockOffset: number, entryCount: number, slots: EncounterSlot[]): void {
+  // Skip 4-byte encounter rate, then parse entries
+  // Each entry: minLevel(1), maxLevel(1), species(u16), padding(u16) = wrong
+  // Actually: each entry is 4 bytes: minLevel(1), maxLevel(1), species(u16)
+  const dataStart = blockOffset + 4;
+
+  for (let e = 0; e < entryCount; e++) {
+    const entryOff = dataStart + e * 4;
+    if (entryOff + 4 > rom.length) break;
+
+    const minLv = rom[entryOff];
+    const maxLv = rom[entryOff + 1];
+    const species = readU16(rom, entryOff + 2);
+
+    if (minLv >= 2 && minLv <= 70 && maxLv >= minLv && maxLv <= 70 && species >= 1 && species <= MAX_SPECIES) {
+      slots.push({
+        speciesOffset: entryOff + 2,
+        minLevelOffset: entryOff,
+        maxLevelOffset: entryOff + 1,
+      });
+    }
+  }
 }
 
 /**
- * Alternative approach: scan the entire ROM for blocks that look like
- * encounter entries (sequences of valid min_level, max_level, species u16 patterns).
+ * Fallback: search for encounter table header by finding a sequence of
+ * valid GBA pointers that form encounter headers.
  */
-function scanForEncounterPatterns(rom: Buffer): WildEncounterEntry[] {
-  const entries: WildEncounterEntry[] = [];
-  const seen = new Set<number>();
+function searchForEncounterTable(rom: Buffer): number | null {
+  // Look for 3+ consecutive valid encounter headers (20 bytes each)
+  for (let i = 0x100000; i < rom.length - 80; i += 4) {
+    let consecutiveValid = 0;
 
-  for (let i = 0x100000; i < rom.length - 96; i += 4) {
-    // Check for a block of 12 consecutive valid entries (grass format)
-    let validCount = 0;
-    for (let e = 0; e < 12; e++) {
-      const off = i + e * 8;
-      if (off + 4 > rom.length) break;
-      const minLv = rom[off];
-      const maxLv = rom[off + 1];
-      const species = readU16(rom, off + 2);
-      if (minLv >= 2 && minLv <= 65 && maxLv >= minLv && maxLv <= 70 && species >= 1 && species <= MAX_SPECIES) {
-        validCount++;
-      } else {
-        break;
+    for (let h = 0; h < 5; h++) {
+      const off = i + h * 20;
+      if (off + 20 > rom.length) break;
+
+      const grassPtr = readU32(rom, off + 4);
+      const waterPtr = readU32(rom, off + 8);
+
+      const grassOff = ptrToOffset(grassPtr);
+      const waterOff = waterPtr === 0 ? 0 : ptrToOffset(waterPtr);
+
+      if (grassOff > 0 && grassOff < rom.length - 50 && (waterOff === 0 || (waterOff > 0 && waterOff < rom.length))) {
+        // Validate the grass data looks like encounter entries
+        const dataStart = grassOff + 4;
+        if (dataStart + 48 < rom.length) {
+          const minLv = rom[dataStart];
+          const maxLv = rom[dataStart + 1];
+          const species = readU16(rom, dataStart + 2);
+          if (minLv >= 2 && minLv <= 60 && maxLv >= minLv && species >= 1 && species <= MAX_SPECIES) {
+            consecutiveValid++;
+          }
+        }
       }
     }
 
-    if (validCount >= 5 && !seen.has(i)) {
-      for (let e = 0; e < validCount; e++) {
-        const off = i + e * 8;
-        if (!seen.has(off)) {
-          entries.push({
-            offset: off + 2,
-            minLevelOffset: off,
-            maxLevelOffset: off + 1,
-          });
-          seen.add(off);
-        }
-      }
-      i += validCount * 8 - 4;
+    if (consecutiveValid >= 3) {
+      return i;
     }
   }
 
-  return entries;
+  return null;
 }
 
 /**
- * Find starter Pokemon in Emerald.
- * Starters (Treecko=277, Torchic=255, Mudkip=258) are stored
- * as u16 species IDs in the ROM.
+ * Find starter Pokemon by searching for the three starters near each
+ * other as u16 values in the ROM's script/data sections.
  */
 const EMERALD_STARTERS = [252, 255, 258]; // Treecko, Torchic, Mudkip
 const FRLG_STARTERS = [1, 4, 7]; // Bulbasaur, Charmander, Squirtle
-const RSE_STARTERS = [252, 255, 258];
 
-function findStarterLocations(rom: Buffer): { offset: number; species: number }[] {
-  const results: { offset: number; species: number }[] = [];
-  const allStarters = [...new Set([...EMERALD_STARTERS, ...FRLG_STARTERS])];
+function findStarterLocations(rom: Buffer): Map<number, number> {
+  const refs = new Map<number, number>();
+  const gameCode = getGameCode(rom);
+  const starters = gameCode.startsWith('BP') && (gameCode[2] === 'R' || gameCode[2] === 'G')
+    ? FRLG_STARTERS
+    : EMERALD_STARTERS;
 
-  for (let i = 0; i < rom.length - 2; i++) {
-    const species = readU16(rom, i);
-    if (allStarters.includes(species)) {
-      // Check if near other starters (within 64 bytes)
-      let nearbyCount = 0;
-      for (let j = Math.max(0, i - 64); j < Math.min(rom.length - 2, i + 64); j += 2) {
-        if (j !== i && allStarters.includes(readU16(rom, j))) {
-          nearbyCount++;
-        }
-      }
-      if (nearbyCount >= 1) {
-        results.push({ offset: i, species });
-      }
+  for (let i = 0; i < rom.length - 2; i += 2) {
+    const val = readU16(rom, i);
+    if (!starters.includes(val)) continue;
+
+    // Check if other starters are nearby (within 32 bytes)
+    let nearby = 0;
+    for (let j = Math.max(0, i - 32); j < Math.min(rom.length - 2, i + 32); j += 2) {
+      if (j !== i && starters.includes(readU16(rom, j))) nearby++;
+    }
+
+    if (nearby >= 1) {
+      refs.set(i, val);
     }
   }
 
-  return results;
+  return refs;
 }
 
 /**
- * Find trainer Pokemon data in Gen 3.
- * Trainer data structures contain species (u16), level (u16), and other fields.
- * The format varies but generally follows patterns we can detect.
+ * Find trainer Pokemon. Gen 3 trainer entries vary by format:
+ * - Standard: [ivs(2), level(2), species(2)]  (6 bytes per Pokemon)
+ * - With moves: [ivs(2), level(2), species(2), move1(2), move2(2), move3(2), move4(2)] (16 bytes)
  */
-interface TrainerPokemonRef {
-  speciesOffset: number;
-  levelOffset: number;
-}
+function findTrainerPokemon(rom: Buffer): Array<{ speciesOffset: number; levelOffset: number }> {
+  const results: Array<{ speciesOffset: number; levelOffset: number }> = [];
+  const gameCode = getGameCode(rom);
 
-function findTrainerPokemon(rom: Buffer): TrainerPokemonRef[] {
-  const refs: TrainerPokemonRef[] = [];
+  // Known trainer data offsets
+  const trainerRanges: Record<string, [number, number]> = {
+    'BPEE': [0x310030, 0x330000], // Emerald
+    'AXVE': [0x1F0000, 0x210000], // Ruby
+    'AXPE': [0x1F0000, 0x210000], // Sapphire
+    'BPRE': [0x2397F4, 0x260000], // FireRed
+    'BPGE': [0x2397F4, 0x260000], // LeafGreen
+  };
 
-  // Trainer Pokemon entries in Gen 3 are typically 8 bytes:
-  // [iv_value(2), level(2), species(2), padding(2)]
-  // or in expanded format: [iv(2), level(2), species(2), held_item(2), move1(2), move2(2), move3(2), move4(2), pad(2)]
+  const range = trainerRanges[gameCode] || [0x200000, Math.min(rom.length, 0x400000)];
 
-  // Scan for sequences of valid trainer Pokemon entries
-  const searchStart = 0x300000;
-  const searchEnd = Math.min(rom.length - 32, 0x600000);
-
-  for (let i = searchStart; i < searchEnd; i += 2) {
-    let consecutiveValid = 0;
-    const pokemonRefs: TrainerPokemonRef[] = [];
+  // Scan for 6-byte trainer Pokemon entries (standard format)
+  for (let i = range[0]; i < range[1] && i < rom.length - 12; i += 2) {
+    let validCount = 0;
+    const refs: Array<{ speciesOffset: number; levelOffset: number }> = [];
 
     for (let p = 0; p < 6; p++) {
       const entryOff = i + p * 8;
@@ -320,20 +271,20 @@ function findTrainerPokemon(rom: Buffer): TrainerPokemonRef[] {
       const species = readU16(rom, entryOff + 4);
 
       if (level >= 2 && level <= 100 && species >= 1 && species <= MAX_SPECIES) {
-        consecutiveValid++;
-        pokemonRefs.push({ speciesOffset: entryOff + 4, levelOffset: entryOff + 2 });
+        validCount++;
+        refs.push({ speciesOffset: entryOff + 4, levelOffset: entryOff + 2 });
       } else {
         break;
       }
     }
 
-    if (consecutiveValid >= 2 && consecutiveValid <= 6) {
-      refs.push(...pokemonRefs);
-      i += consecutiveValid * 8 - 2;
+    if (validCount >= 2 && validCount <= 6) {
+      results.push(...refs);
+      i += validCount * 8 - 2;
     }
   }
 
-  return refs;
+  return results;
 }
 
 export function randomizeGen3(rom: Buffer, settings: GeneratorSettings, seed: string): Buffer {
@@ -341,83 +292,80 @@ export function randomizeGen3(rom: Buffer, settings: GeneratorSettings, seed: st
   const rng = new SeededRNG(seed);
   let changes = 0;
 
+  const gameCode = getGameCode(modified);
+  console.log(`[Gen3 Randomizer] Game code: "${gameCode}", size: ${modified.length} bytes`);
+
   // Randomize wild encounters
   if (settings.randomizeWildPokemon) {
-    let encounters = findWildEncounterTables(modified);
-    if (encounters.length < 10) {
-      // Fall back to pattern scanning if structured search found too few
-      encounters = scanForEncounterPatterns(modified);
-    }
+    const slots = findEncounterSlots(modified);
+    console.log(`[Gen3 Randomizer] Found ${slots.length} wild encounter slots`);
 
-    for (const entry of encounters) {
-      const minLv = modified[entry.minLevelOffset];
+    for (const slot of slots) {
+      const minLv = modified[slot.minLevelOffset];
       let newSpecies: number;
-
       if (minLv <= 15) {
-        // Early routes: favor basic Pokemon (lower Dex numbers tend to be weaker)
         const earlyPool = ENCOUNTER_POOL.filter(s => s <= 250);
         newSpecies = rng.pick(earlyPool.length > 0 ? earlyPool : ENCOUNTER_POOL);
       } else {
         newSpecies = rng.pick(ENCOUNTER_POOL);
       }
-
-      writeU16(modified, entry.offset, newSpecies);
+      writeU16(modified, slot.speciesOffset, newSpecies);
       changes++;
     }
   }
 
   // Randomize starters
   if (settings.randomizeStarters) {
-    const starterLocs = findStarterLocations(modified);
-    const newStarters = rng.shuffle([...ENCOUNTER_POOL]).slice(0, 3);
+    const starterRefs = findStarterLocations(modified);
+    console.log(`[Gen3 Randomizer] Found ${starterRefs.size} starter references`);
 
-    // Determine which starter set this ROM uses
-    const isRSE = starterLocs.some(s => RSE_STARTERS.includes(s.species));
-    const isFRLG = starterLocs.some(s => FRLG_STARTERS.includes(s.species));
+    if (starterRefs.size > 0) {
+      const newStarters = rng.shuffle([...ENCOUNTER_POOL]).slice(0, 3);
+      const starters = gameCode.startsWith('BP') && (gameCode[2] === 'R' || gameCode[2] === 'G')
+        ? FRLG_STARTERS : EMERALD_STARTERS;
 
-    const starterSet = isRSE ? RSE_STARTERS : (isFRLG ? FRLG_STARTERS : RSE_STARTERS);
-    const starterMap = new Map<number, number>();
-    for (let i = 0; i < starterSet.length; i++) {
-      starterMap.set(starterSet[i], newStarters[i]);
-    }
+      const starterMap = new Map<number, number>();
+      for (let i = 0; i < starters.length; i++) {
+        starterMap.set(starters[i], newStarters[i]);
+      }
 
-    for (const loc of starterLocs) {
-      const replacement = starterMap.get(loc.species);
-      if (replacement !== undefined) {
-        writeU16(modified, loc.offset, replacement);
-        changes++;
+      for (const [offset, original] of starterRefs) {
+        const replacement = starterMap.get(original);
+        if (replacement !== undefined) {
+          writeU16(modified, offset, replacement);
+          changes++;
+        }
       }
     }
   }
 
   // Randomize trainers
   if (settings.randomizeTrainers) {
-    const trainerPokemon = findTrainerPokemon(modified);
-    for (const ref of trainerPokemon) {
-      writeU16(modified, ref.speciesOffset, rng.pick(ENCOUNTER_POOL));
+    const trainers = findTrainerPokemon(modified);
+    console.log(`[Gen3 Randomizer] Found ${trainers.length} trainer Pokemon`);
 
+    for (const ref of trainers) {
+      writeU16(modified, ref.speciesOffset, rng.pick(ENCOUNTER_POOL));
       if (settings.levelScaling !== 1.0) {
         const level = readU16(modified, ref.levelOffset);
-        const newLevel = Math.max(2, Math.min(100, Math.round(level * settings.levelScaling)));
-        writeU16(modified, ref.levelOffset, newLevel);
+        writeU16(modified, ref.levelOffset, Math.max(2, Math.min(100, Math.round(level * settings.levelScaling))));
       }
       changes++;
     }
   } else if (settings.levelScaling !== 1.0) {
-    const trainerPokemon = findTrainerPokemon(modified);
-    for (const ref of trainerPokemon) {
+    const trainers = findTrainerPokemon(modified);
+    for (const ref of trainers) {
       const level = readU16(modified, ref.levelOffset);
-      const newLevel = Math.max(2, Math.min(100, Math.round(level * settings.levelScaling)));
-      writeU16(modified, ref.levelOffset, newLevel);
+      writeU16(modified, ref.levelOffset, Math.max(2, Math.min(100, Math.round(level * settings.levelScaling))));
       changes++;
     }
   }
 
-  // Write metadata signature
   const sig = Buffer.from(`NUZ3|${seed}|${changes}`);
   if (modified.length > sig.length + 256) {
     sig.copy(modified, modified.length - sig.length - 64);
   }
 
+  console.log(`[Gen3 Randomizer] Total changes: ${changes}`);
   return modified;
 }

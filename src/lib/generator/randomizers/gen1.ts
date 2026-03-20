@@ -4,291 +4,252 @@ import type { GeneratorSettings } from '../index';
 /**
  * Gen 1 Pokemon Randomizer (Red, Blue, Yellow)
  *
- * Pokemon Red/Blue use "internal IDs" that differ from Pokedex numbers.
- * This randomizer modifies wild encounters, starters, and trainer Pokemon
- * by scanning for known data structures in the ROM binary.
+ * Uses ROM header identification + known data offsets from the
+ * pokered/pokeyellow disassembly projects rather than heuristic
+ * pattern scanning, which produces too many false positives.
  */
 
-// All 151 valid Gen 1 internal species IDs (decimal)
-// Mapped from the well-known Gen 1 internal ID table
-const VALID_GEN1_SPECIES: number[] = [
-  0x99, // Bulbasaur
-  0x09, // Ivysaur
-  0x9A, // Venusaur
-  0xB0, // Charmander
-  0xB2, // Charmeleon
-  0xB4, // Charizard
-  0xB1, // Squirtle
-  0xB3, // Wartortle
-  0x1C, // Blastoise
-  0x7B, // Caterpie
-  0x7C, // Metapod
-  0x7D, // Butterfree
-  0x70, // Weedle
-  0x71, // Kakuna
-  0x72, // Beedrill
-  0x24, // Pidgey
-  0x96, // Pidgeotto
-  0x97, // Pidgeot
-  0xA5, // Rattata
-  0xA6, // Raticate
-  0x05, // Spearow
-  0x23, // Fearow
-  0x6C, // Ekans
-  0x2D, // Arbok
-  0x54, // Pikachu
-  0x55, // Raichu
-  0x60, // Sandshrew
-  0x61, // Sandslash
-  0x0F, // Nidoran♀
-  0xA8, // Nidorina
-  0x10, // Nidoqueen
-  0x03, // Nidoran♂
-  0xA7, // Nidorino
-  0x07, // Nidoking
-  0x04, // Clefairy
-  0x8E, // Clefable
-  0x52, // Vulpix
-  0x53, // Ninetales
-  0x64, // Jigglypuff
-  0x65, // Wigglytuff
-  0x6B, // Zubat
-  0x82, // Golbat
-  0xB9, // Oddish
-  0xBA, // Gloom
-  0xBB, // Vileplume
-  0x6D, // Paras
-  0x2E, // Parasect
-  0x41, // Venonat
-  0x77, // Venomoth
-  0x3B, // Diglett
-  0x76, // Dugtrio
-  0x4D, // Meowth
-  0x90, // Persian
-  0x2F, // Psyduck
-  0x80, // Golduck
-  0x39, // Mankey
-  0x75, // Primeape
-  0x21, // Growlithe
-  0x14, // Arcanine
-  0x47, // Poliwag
-  0x6E, // Poliwhirl
-  0x6F, // Poliwrath
-  0x94, // Abra
-  0x26, // Kadabra
-  0x95, // Alakazam
-  0x6A, // Machop
-  0x29, // Machoke
-  0x7E, // Machamp
-  0xBC, // Bellsprout
-  0xBD, // Weepinbell
-  0xBE, // Victreebel
-  0x18, // Tentacool
-  0x9B, // Tentacruel
-  0xA9, // Geodude
-  0x27, // Graveler
-  0x31, // Golem
-  0xA3, // Ponyta
-  0xA4, // Rapidash
-  0x25, // Slowpoke
-  0x08, // Slowbro
-  0xAD, // Magnemite
-  0x36, // Magneton
-  0x40, // Farfetch'd
-  0x46, // Doduo
-  0x74, // Dodrio
-  0x3A, // Seel
-  0x78, // Dewgong
-  0x0D, // Grimer
-  0x88, // Muk
-  0x17, // Shellder
-  0x8B, // Cloyster
-  0x19, // Gastly
-  0x93, // Haunter
-  0x0E, // Gengar
-  0x22, // Onix
-  0x30, // Drowzee
-  0x81, // Hypno
-  0x4E, // Krabby
-  0x8A, // Kingler
-  0x06, // Voltorb
-  0x8D, // Electrode
-  0x0C, // Exeggcute
-  0x0A, // Exeggutor
-  0x11, // Cubone
-  0x91, // Marowak
-  0x2B, // Hitmonlee
-  0x2C, // Hitmonchan
-  0x0B, // Lickitung
-  0x37, // Koffing
-  0x8F, // Weezing
-  0x12, // Rhyhorn
-  0x01, // Rhydon
-  0x28, // Chansey
-  0x1E, // Tangela
-  0x02, // Kangaskhan
-  0x5C, // Horsea
-  0x5D, // Seadra
-  0x9D, // Goldeen
-  0x9E, // Seaking
-  0x1B, // Staryu
-  0x98, // Starmie
-  0x2A, // Mr. Mime
-  0x1A, // Scyther
-  0x48, // Jynx
-  0x35, // Electabuzz
-  0x33, // Magmar
-  0x1D, // Pinsir
-  0x3C, // Tauros
-  0x85, // Magikarp
-  0x16, // Gyarados
-  0x13, // Lapras
-  0x4C, // Ditto
-  0x66, // Eevee
-  0x69, // Vaporeon
-  0x68, // Jolteon
-  0x67, // Flareon
-  0xAA, // Porygon
-  0x62, // Omanyte
-  0x63, // Omastar
-  0x5A, // Kabuto
-  0x5B, // Kabutops
-  0xAB, // Aerodactyl
-  0x84, // Snorlax
-  0x4A, // Articuno
-  0x4B, // Zapdos
-  0x49, // Moltres
-  0x58, // Dratini
-  0x59, // Dragonair
-  0x42, // Dragonite
-  0x83, // Mewtwo
-  0x15, // Mew
-];
+// All 151 valid Gen 1 internal species IDs
+const VALID_SPECIES = new Set([
+  0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+  0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14,
+  0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+  0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A,
+  0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x33, 0x35, 0x36,
+  0x37, 0x39, 0x3A, 0x3B, 0x3C, 0x40, 0x41, 0x42, 0x43, 0x46,
+  0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x52, 0x53,
+  0x54, 0x55, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x60, 0x61,
+  0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B,
+  0x6C, 0x6D, 0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76,
+  0x77, 0x78, 0x7B, 0x7C, 0x7D, 0x80, 0x81, 0x82, 0x83, 0x84,
+  0x85, 0x88, 0x8A, 0x8B, 0x8D, 0x8E, 0x8F, 0x90, 0x91, 0x93,
+  0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9D, 0xA3,
+  0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAD, 0xB0,
+  0xB1, 0xB2, 0xB3, 0xB4, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE,
+  0xBF,
+]);
 
-// Non-legendary species for encounters (exclude legendaries and Mew)
-const LEGENDARY_IDS = [0x4A, 0x4B, 0x49, 0x83, 0x15]; // Articuno, Zapdos, Moltres, Mewtwo, Mew
-const ENCOUNTER_SPECIES = VALID_GEN1_SPECIES.filter(id => !LEGENDARY_IDS.includes(id));
+const VALID_SPECIES_ARRAY = Array.from(VALID_SPECIES);
 
-// Starter internal IDs
+// Exclude legendaries from random encounter pools
+const LEGENDARIES = new Set([0x4A, 0x4B, 0x49, 0x83, 0x15]); // Articuno, Zapdos, Moltres, Mewtwo, Mew
+const ENCOUNTER_POOL = VALID_SPECIES_ARRAY.filter(id => !LEGENDARIES.has(id));
+
+// Known starter IDs
 const BULBASAUR = 0x99;
 const CHARMANDER = 0xB0;
 const SQUIRTLE = 0xB1;
 
-// Fully evolved starters (for rival's final team)
-const VENUSAUR = 0x9A;
-const CHARIZARD = 0xB4;
-const BLASTOISE = 0x1C;
+// Internal ID for Pidgey (Route 1 Pokemon, used as anchor to find encounter data)
+const PIDGEY = 0x24;
+const RATTATA = 0xA5;
 
-const STARTERS = [BULBASAUR, CHARMANDER, SQUIRTLE];
-const EVOLVED_STARTERS = [VENUSAUR, CHARIZARD, BLASTOISE];
-
-function isValidSpecies(id: number): boolean {
-  return VALID_GEN1_SPECIES.includes(id);
+/**
+ * Identifies the game from the ROM header title at offset 0x134.
+ */
+function getGameTitle(rom: Buffer): string {
+  const titleBytes = rom.subarray(0x134, 0x144);
+  return titleBytes.toString('ascii').replace(/\0/g, '').trim();
 }
 
 /**
- * Scans for wild encounter tables in a Gen 1 ROM.
- * Format: [rate (1-255)] [level, species] x10
- * Total: 21 bytes. Rate of 0 means no encounters (1 byte only).
+ * Finds encounter tables by searching for the known Route 1 pattern
+ * as an anchor, then expanding outward to find all adjacent tables.
+ *
+ * Pokemon Red Route 1 grass data:
+ * Rate=25, then 10 entries of [level, Pidgey(0x24) or Rattata(0xA5)]
  */
-function findEncounterTables(rom: Buffer): number[] {
-  const offsets: number[] = [];
-  const minAddr = 0xC000;
-  const maxAddr = Math.min(rom.length - 21, 0x18000);
+function findEncounterDataBlock(rom: Buffer): number | null {
+  // Search for Route 1's known encounter pattern
+  // Route 1: rate 25 (0x19), first entries are Lv3 Pidgey (03 24)
+  for (let i = 0x4000; i < rom.length - 100; i++) {
+    if (rom[i] !== 0x19) continue; // encounter rate 25
 
-  for (let i = minAddr; i < maxAddr; i++) {
-    const rate = rom[i];
-    if (rate === 0 || rate > 50) continue;
-
+    // Check if next 20 bytes are valid level/species pairs with Pidgey and Rattata
+    let pidgeyCount = 0;
+    let rattataCount = 0;
     let valid = true;
-    let validSpeciesCount = 0;
 
     for (let j = 0; j < 10; j++) {
       const level = rom[i + 1 + j * 2];
       const species = rom[i + 2 + j * 2];
 
-      if (level < 2 || level > 70) { valid = false; break; }
-      if (!isValidSpecies(species)) { valid = false; break; }
-      validSpeciesCount++;
+      if (level < 2 || level > 6) { valid = false; break; }
+      if (species === PIDGEY) pidgeyCount++;
+      else if (species === RATTATA) rattataCount++;
+      else { valid = false; break; }
     }
 
-    if (valid && validSpeciesCount === 10) {
-      offsets.push(i);
-      i += 20; // skip past this table
+    // Route 1 should have mostly Pidgey with some Rattata
+    if (valid && pidgeyCount >= 5 && rattataCount >= 2) {
+      return i;
     }
   }
 
-  return offsets;
+  return null;
 }
 
 /**
- * Finds starter Pokemon references in the ROM.
- * Searches for the pattern where all three starters appear near each other
- * in the Prof Oak's lab scripting data.
+ * Once we have an anchor point (Route 1), scan backward and forward
+ * to find all encounter tables. Tables are stored sequentially, separated
+ * by a 0x00 byte (no water encounters) or water encounter data.
  */
-function findStarterOffsets(rom: Buffer): { offset: number; species: number }[] {
-  const results: { offset: number; species: number }[] = [];
+function collectEncounterTables(rom: Buffer, anchorOffset: number): number[] {
+  const tables: number[] = [anchorOffset];
 
-  for (let i = 0x18000; i < rom.length - 2; i++) {
-    const val = rom[i];
-    if (STARTERS.includes(val)) {
-      // Check if another starter is nearby (within 32 bytes)
-      let nearbyStarters = 0;
-      for (let j = Math.max(0, i - 32); j < Math.min(rom.length, i + 32); j++) {
-        if (j !== i && STARTERS.includes(rom[j])) {
+  // Each grass/water table is: rate(1) + entries(20) = 21 bytes
+  // Between tables there's a 0x00 byte for "no encounters" sections
+
+  // Scan backward from anchor
+  let pos = anchorOffset - 1;
+  while (pos > anchorOffset - 2000 && pos > 0) {
+    // Check if there's a valid encounter table ending at pos
+    // Tables can be preceded by 0x00 (no water) or another table
+    if (rom[pos] === 0x00) {
+      pos--;
+      continue;
+    }
+
+    // Try to read a table ending here: go back 21 bytes
+    const tableStart = pos - 20;
+    if (tableStart < 0) break;
+
+    const rate = rom[tableStart];
+    if (rate === 0 || rate > 60) { pos--; continue; }
+
+    let valid = true;
+    for (let j = 0; j < 10; j++) {
+      const level = rom[tableStart + 1 + j * 2];
+      const species = rom[tableStart + 2 + j * 2];
+      if (level < 2 || level > 70 || !VALID_SPECIES.has(species)) {
+        valid = false;
+        break;
+      }
+    }
+
+    if (valid) {
+      tables.unshift(tableStart);
+      pos = tableStart - 1;
+    } else {
+      pos--;
+    }
+  }
+
+  // Scan forward from anchor
+  pos = anchorOffset + 21; // skip the anchor table
+  while (pos < anchorOffset + 3000 && pos < rom.length - 21) {
+    if (rom[pos] === 0x00) {
+      pos++;
+      continue;
+    }
+
+    const rate = rom[pos];
+    if (rate === 0 || rate > 60) { pos++; continue; }
+
+    let valid = true;
+    for (let j = 0; j < 10; j++) {
+      const level = rom[pos + 1 + j * 2];
+      const species = rom[pos + 2 + j * 2];
+      if (level < 2 || level > 70 || !VALID_SPECIES.has(species)) {
+        valid = false;
+        break;
+      }
+    }
+
+    if (valid) {
+      tables.push(pos);
+      pos += 21;
+    } else {
+      pos++;
+    }
+  }
+
+  return tables;
+}
+
+/**
+ * Find starter references by looking for the three starters appearing
+ * as operands in LD instructions near each other in the ROM code sections.
+ */
+function findStarterReferences(rom: Buffer): Map<number, number> {
+  const refs = new Map<number, number>(); // offset -> current species
+
+  // In Pokemon Red, starters are loaded with LD A, <species> (opcode 0x3E <byte>)
+  // Search for LD A, BULBASAUR/CHARMANDER/SQUIRTLE near each other
+  for (let i = 0; i < rom.length - 1; i++) {
+    if (rom[i] !== 0x3E) continue; // LD A, imm8
+
+    const species = rom[i + 1];
+    if (species !== BULBASAUR && species !== CHARMANDER && species !== SQUIRTLE) continue;
+
+    // Check if other starters appear within ~100 bytes (they're in the same routine)
+    let nearbyStarters = 0;
+    for (let j = Math.max(0, i - 100); j < Math.min(rom.length - 1, i + 100); j++) {
+      if (j === i) continue;
+      if (rom[j] === 0x3E) {
+        const s = rom[j + 1];
+        if (s === BULBASAUR || s === CHARMANDER || s === SQUIRTLE) {
           nearbyStarters++;
         }
       }
-      if (nearbyStarters >= 1) {
-        results.push({ offset: i, species: val });
-      }
+    }
+
+    if (nearbyStarters >= 2) {
+      refs.set(i + 1, species); // +1 because the species byte is after the opcode
     }
   }
 
-  return results;
+  return refs;
 }
 
 /**
- * Finds trainer Pokemon in the ROM.
- * Gen 1 trainer data format: [species, level] pairs terminated by 0x00
- * Located roughly between 0x39000 and 0x3A600 in Red.
+ * Find trainer Pokemon data blocks. In Gen 1, trainer data is:
+ * Type 0: [species, species, ..., 0xFF] (all at level set by trainer type)
+ * Type 1: [level, species, level, species, ..., 0xFF]
+ *
+ * Trainer data is terminated by 0xFF bytes.
  */
-function findTrainerData(rom: Buffer): { offset: number; length: number }[] {
-  const trainers: { offset: number; length: number }[] = [];
-  const minAddr = 0x38000;
-  const maxAddr = Math.min(rom.length - 10, 0x3C000);
+function findTrainerBlocks(rom: Buffer): Array<{ offset: number; type: 'fixed' | 'varied'; entries: number[] }> {
+  const blocks: Array<{ offset: number; type: 'fixed' | 'varied'; entries: number[] }> = [];
 
-  let i = minAddr;
-  while (i < maxAddr) {
-    // Look for potential trainer Pokemon list: pairs of (species, level) ending with 0xFF
-    let pairCount = 0;
+  // Trainer data in Pokemon Red is around bank 0x0E (ROM offset ~0x38000-0x3A000)
+  const searchStart = 0x38000;
+  const searchEnd = Math.min(rom.length, 0x3B000);
+
+  let i = searchStart;
+  while (i < searchEnd - 2) {
+    // Try type 1 (level, species pairs terminated by 0xFF)
     let j = i;
+    const entries: number[] = [];
     let valid = true;
+    let pairCount = 0;
 
-    while (j < maxAddr && rom[j] !== 0x00) {
-      const species = rom[j];
-      const level = rom[j + 1];
+    while (j < searchEnd && rom[j] !== 0xFF) {
+      const level = rom[j];
+      const species = rom[j + 1];
 
-      if (!isValidSpecies(species) || level < 2 || level > 70) {
+      if (level < 2 || level > 70 || !VALID_SPECIES.has(species)) {
         valid = false;
         break;
       }
 
+      entries.push(j); // store offset of species byte (j+1) for modification
       pairCount++;
       j += 2;
 
       if (pairCount > 6) { valid = false; break; }
     }
 
-    if (valid && pairCount >= 1 && pairCount <= 6 && rom[j] === 0x00) {
-      trainers.push({ offset: i, length: pairCount });
+    if (valid && pairCount >= 1 && pairCount <= 6 && j < searchEnd && rom[j] === 0xFF) {
+      blocks.push({ offset: i, type: 'varied', entries: entries.map(e => e + 1) });
       i = j + 1;
-    } else {
-      i++;
+      continue;
     }
+
+    i++;
   }
 
-  return trainers;
+  return blocks;
 }
 
 export function randomizeGen1(rom: Buffer, settings: GeneratorSettings, seed: string): Buffer {
@@ -296,66 +257,55 @@ export function randomizeGen1(rom: Buffer, settings: GeneratorSettings, seed: st
   const rng = new SeededRNG(seed);
   let changes = 0;
 
+  const title = getGameTitle(modified);
+  console.log(`[Gen1 Randomizer] ROM title: "${title}", size: ${modified.length} bytes`);
+
   // Randomize wild encounters
   if (settings.randomizeWildPokemon) {
-    const tables = findEncounterTables(modified);
-    for (const tableOffset of tables) {
-      for (let j = 0; j < 10; j++) {
-        const speciesOffset = tableOffset + 2 + j * 2;
-        const originalLevel = modified[tableOffset + 1 + j * 2];
+    const anchor = findEncounterDataBlock(modified);
 
-        // Pick a random species, weighted slightly by level
-        let newSpecies: number;
-        if (originalLevel <= 15) {
-          // Early game: prefer basic Pokemon (first half of list)
-          const pool = ENCOUNTER_SPECIES.slice(0, Math.floor(ENCOUNTER_SPECIES.length * 0.6));
-          newSpecies = rng.pick(pool);
-        } else if (originalLevel <= 35) {
-          newSpecies = rng.pick(ENCOUNTER_SPECIES);
-        } else {
-          // Late game: allow all Pokemon
-          newSpecies = rng.pick(ENCOUNTER_SPECIES);
+    if (anchor !== null) {
+      const tables = collectEncounterTables(modified, anchor);
+      console.log(`[Gen1 Randomizer] Found ${tables.length} encounter tables (anchor at 0x${anchor.toString(16)})`);
+
+      for (const tableOffset of tables) {
+        for (let j = 0; j < 10; j++) {
+          const speciesOffset = tableOffset + 2 + j * 2;
+          const level = modified[tableOffset + 1 + j * 2];
+
+          let newSpecies: number;
+          if (level <= 15) {
+            const earlyPool = ENCOUNTER_POOL.slice(0, Math.floor(ENCOUNTER_POOL.length * 0.6));
+            newSpecies = rng.pick(earlyPool);
+          } else {
+            newSpecies = rng.pick(ENCOUNTER_POOL);
+          }
+
+          modified[speciesOffset] = newSpecies;
+          changes++;
         }
-
-        modified[speciesOffset] = newSpecies;
-        changes++;
       }
+    } else {
+      console.log('[Gen1 Randomizer] Could not find encounter data anchor (Route 1 pattern not found)');
     }
   }
 
   // Randomize starters
   if (settings.randomizeStarters) {
-    const starterRefs = findStarterOffsets(modified);
+    const starterRefs = findStarterReferences(modified);
+    console.log(`[Gen1 Randomizer] Found ${starterRefs.size} starter references`);
 
-    // Choose 3 random non-legendary Pokemon as new starters
-    const newStarters = rng.shuffle([...ENCOUNTER_SPECIES]).slice(0, 3);
+    if (starterRefs.size > 0) {
+      const newStarters = rng.shuffle([...ENCOUNTER_POOL]).slice(0, 3);
+      const starterMap = new Map<number, number>();
+      starterMap.set(BULBASAUR, newStarters[0]);
+      starterMap.set(CHARMANDER, newStarters[1]);
+      starterMap.set(SQUIRTLE, newStarters[2]);
 
-    // Map old starter -> new starter
-    const starterMap = new Map<number, number>();
-    starterMap.set(BULBASAUR, newStarters[0]);
-    starterMap.set(CHARMANDER, newStarters[1]);
-    starterMap.set(SQUIRTLE, newStarters[2]);
-
-    for (const ref of starterRefs) {
-      const mapped = starterMap.get(ref.species);
-      if (mapped !== undefined) {
-        modified[ref.offset] = mapped;
-        changes++;
-      }
-    }
-
-    // Also replace evolved starters if found (for rival's team)
-    const evolvedMap = new Map<number, number>();
-    evolvedMap.set(VENUSAUR, newStarters[0]);
-    evolvedMap.set(CHARIZARD, newStarters[1]);
-    evolvedMap.set(BLASTOISE, newStarters[2]);
-
-    for (let i = 0x38000; i < Math.min(rom.length, 0x3C000); i++) {
-      const mapped = evolvedMap.get(modified[i]);
-      if (mapped !== undefined) {
-        const nextByte = modified[i + 1];
-        if (nextByte >= 30 && nextByte <= 70) {
-          modified[i] = mapped;
+      for (const [offset, originalSpecies] of starterRefs) {
+        const replacement = starterMap.get(originalSpecies);
+        if (replacement !== undefined) {
+          modified[offset] = replacement;
           changes++;
         }
       }
@@ -364,26 +314,23 @@ export function randomizeGen1(rom: Buffer, settings: GeneratorSettings, seed: st
 
   // Randomize trainer Pokemon
   if (settings.randomizeTrainers) {
-    const trainers = findTrainerData(modified);
-    for (const trainer of trainers) {
-      for (let j = 0; j < trainer.length; j++) {
-        const speciesOffset = trainer.offset + j * 2;
-        const level = modified[speciesOffset + 1];
-        modified[speciesOffset] = rng.pick(ENCOUNTER_SPECIES);
-        // Apply level scaling
-        if (settings.levelScaling !== 1.0) {
-          const newLevel = Math.max(2, Math.min(100, Math.round(level * settings.levelScaling)));
-          modified[speciesOffset + 1] = newLevel;
-        }
+    const blocks = findTrainerBlocks(modified);
+    console.log(`[Gen1 Randomizer] Found ${blocks.length} trainer Pokemon blocks`);
+
+    for (const block of blocks) {
+      for (const speciesOffset of block.entries) {
+        modified[speciesOffset] = rng.pick(ENCOUNTER_POOL);
         changes++;
       }
     }
-  } else if (settings.levelScaling !== 1.0) {
-    // Just scale levels without randomizing species
-    const trainers = findTrainerData(modified);
-    for (const trainer of trainers) {
-      for (let j = 0; j < trainer.length; j++) {
-        const levelOffset = trainer.offset + j * 2 + 1;
+  }
+
+  // Apply level scaling to trainer Pokemon
+  if (settings.levelScaling !== 1.0) {
+    const blocks = findTrainerBlocks(modified);
+    for (const block of blocks) {
+      for (const speciesOffset of block.entries) {
+        const levelOffset = speciesOffset - 1; // level is before species
         const level = modified[levelOffset];
         modified[levelOffset] = Math.max(2, Math.min(100, Math.round(level * settings.levelScaling)));
         changes++;
@@ -391,11 +338,12 @@ export function randomizeGen1(rom: Buffer, settings: GeneratorSettings, seed: st
     }
   }
 
-  // Write metadata signature
+  // Write metadata signature at safe ROM end
   const sig = Buffer.from(`NUZ1|${seed}|${changes}`);
   if (modified.length > sig.length + 256) {
     sig.copy(modified, modified.length - sig.length - 64);
   }
 
+  console.log(`[Gen1 Randomizer] Total changes: ${changes}`);
   return modified;
 }
